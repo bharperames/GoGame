@@ -1,0 +1,2 @@
+# GoGame
+Game of Go
