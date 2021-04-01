@@ -1,0 +1,493 @@
+<canvas id="myCanvas" width="400" height="400" style="border:1px solid #000000;">
+</canvas></br>
+<input id="playmode" type="checkbox" checked="true">Play mode</input>
+<input type="radio" id="black" name="color" value="black" checked="true">
+<label for="black">Black</label>
+<input type="radio" id="white" name="color" value="white">
+<label for="white">White</label>
+<input type="radio" id="clear" name="color" value="clear">
+<label for="clear">Clear</label>
+<!-- <button onclick="cleanBoard(); drawBoard();">Clean Board</button> -->
+<button onclick="undo()">Undo</button>
+<button onclick="reset()">Reset</button>
+<script>
+
+var canvas = document.getElementById("myCanvas");
+var context = canvas.getContext("2d");
+
+var elemLeft = canvas.offsetLeft + canvas.clientLeft;
+var elemTop = canvas.offsetTop + canvas.clientTop;
+
+var undoBoard;
+var board;
+
+// Padding
+var p = 40;
+var boardSize = 9;
+var edgeWidth = 40;
+var bw = (boardSize-1)*edgeWidth;
+var stoneRadius = edgeWidth/4;
+
+const NOSTONE    = 0;
+const BLACKSTONE = 1;
+const WHITESTONE = 2;
+
+const UNVISITED = 0;
+const VISITED = 1;
+const LIVEPIECE = 2;
+const DEADPIECE = 4;
+
+// Add event listener for `click` events.
+canvas.addEventListener('click', clickOnGameCanvas, false);
+
+function undo()
+{
+    if (undoBoard)
+    {
+      var temp = board;
+      board = copyBoard(undoBoard);
+      undoBoard = temp;
+
+      // On Undo, also reset the move back to other player
+      swapActivePlayer(getActiveStone());
+    }
+
+    drawBoard();
+}
+
+function reset()
+{
+    undoBoard = copyBoard(board);
+    initBoard();
+    drawBoard();
+}
+
+function getFilteredAdjacentVertices(visitedBoard, testBoard, vert_x, vert_y, oppStone)
+{
+    var vertices = [];
+    if ((vert_x > 0) && visitedBoard[vert_y][vert_x-1] == 0 && testBoard[vert_y][vert_x-1] != oppStone )
+      vertices.push({"x":vert_x-1, "y":vert_y});
+    if ((vert_y > 0) && visitedBoard[vert_y-1][vert_x] == 0 && testBoard[vert_y-1][vert_x] != oppStone )
+      vertices.push({"x":vert_x, "y":vert_y-1});
+    if ((vert_x < boardSize-1) && visitedBoard[vert_y][vert_x+1] == 0 && testBoard[vert_y][vert_x+1] != oppStone )
+      vertices.push({"x":vert_x+1, "y":vert_y});
+    if ((vert_y < boardSize-1) && visitedBoard[vert_y+1][vert_x] == 0 && testBoard[vert_y+1][vert_x] != oppStone )
+      vertices.push({"x":vert_x, "y":vert_y+1});
+
+    return vertices;
+}
+
+function getAdjacentStoneVertices(testBoard, vert_x, vert_y)
+{
+    var vertexStone = testBoard[vert_y][vert_x];
+    var vertices = [];
+
+    if ((vert_x > 0) && testBoard[vert_y][vert_x-1] == vertexStone )
+      vertices.push({"x":vert_x-1, "y":vert_y});
+    if ((vert_y > 0) && testBoard[vert_y-1][vert_x] == vertexStone )
+      vertices.push({"x":vert_x, "y":vert_y-1});
+    if ((vert_x < boardSize-1) && testBoard[vert_y][vert_x+1] == vertexStone )
+      vertices.push({"x":vert_x+1, "y":vert_y});
+    if ((vert_y < boardSize-1) && testBoard[vert_y+1][vert_x] == vertexStone )
+      vertices.push({"x":vert_x, "y":vert_y+1});
+
+    return vertices;
+}
+
+function mergeGroups(markingBoard, group1, group2)
+{
+  var maxGroup = Math.max(group1, group2);
+  var minGroup = Math.min(group1, group2);
+
+  for (var y = 0; y < markingBoard.length; y++)
+  {
+      for (var x=0; x < markingBoard[y].length; x++)
+      {
+          if (markingBoard[y][x] == minGroup)
+            markingBoard[y][x] = maxGroup;
+      }
+  }
+}
+
+// Clearing the board has to be done in two phases, giving priority to the
+//   current stone color being played
+function cleanBoard(testBoard, stoneType)
+{
+  var groupedBoard = identifyGroups(testBoard);
+  //console.log("groupedBoard: ", groupedBoard);
+
+  var groupStatus = new Object();
+
+  // kill groups for opposing stone first
+  var oppStone = (stoneType==WHITESTONE)? BLACKSTONE : WHITESTONE;
+  processGroups(groupedBoard, groupStatus, testBoard, oppStone);
+
+  // Now that some space might be opened up, process the trapped group of other stone
+  processGroups(groupedBoard, groupStatus, testBoard, stoneType);
+
+  return testBoard;
+}
+
+// Process and eliminate any trapped groups of stones for the specified stone color
+function processGroups(groupedBoard, groupStatus, testBoard, stoneType)
+{
+  for (var y = 0; y < groupedBoard.length; y++)
+  {
+      for (var x=0; x < groupedBoard[y].length; x++)
+      {
+          if (testBoard[y][x] != stoneType)
+            continue;
+
+          var groupNum = groupedBoard[y][x];
+          if (groupNum == 0 || groupStatus[groupNum] > 0)
+            continue;
+
+          groupStatus[groupNum] = 1;
+          var visitedBoard = getBlankBoard();
+          // Using vertex (x,y) as a proxy for entire group, see if it has liberty,
+          //   which means there is at least one open vertex adjacent to group
+          //   of contiguous vertices connected by the same color stone.
+          var groupHasLiberty = vertexHasLiberty(visitedBoard, testBoard, x, y, testBoard[y][x]); // TODO: Rename "checkLiberty"
+          if (!groupHasLiberty)
+            groupStatus[groupNum] = 2; // Kill group
+      }
+  }
+
+  // Remove all the killed groups
+  for (var y = 0; y < testBoard.length; y++)
+  {
+      for (var x = 0; x < testBoard[y].length; x++)
+      {
+          var groupNum = groupedBoard[y][x];
+          if (groupNum > 0 && groupStatus[groupNum] == 2)
+             testBoard[y][x] = NOSTONE;
+      }
+  }
+}
+
+// ****************************
+function identifyGroups(testBoard)
+{
+  var markingBoard = getBlankBoard();
+  var nextGroupNumber = 1;
+
+  for (var y = 0; y < testBoard.length; y++)
+  {
+    for (var x=0; x < testBoard[y].length; x++)
+    {
+      var vertexStone = testBoard[y][x];
+      if (vertexStone == NOSTONE)
+        continue;
+
+      var vertices = getAdjacentStoneVertices(testBoard, x, y);
+      //console.log(`ClearBoard2 Vertex:(${x}, ${y}) Stone:${vertexStone} Adjacent count: ${vertices.length} vertices:`, vertices);
+
+      var vertexGroupNumber = markingBoard[y][x];
+      if (vertexGroupNumber == 0)
+      {
+        markingBoard[y][x] = nextGroupNumber;
+        nextGroupNumber++;
+      }
+
+      for (var i = 0; i < vertices.length; i++)
+      {
+        var adj_x = vertices[i].x;
+        var adj_y = vertices[i].y;
+        //console.log(`ClearBoard2: Adj[${i}] @ (${adj_x}, ${adj_y}) marking: ${markingBoard[adj_y][adj_x]} stone: ${testBoard[adj_y][adj_x]}`);
+
+        // Absorb adjacent vertices into the same group as local origin
+        if (testBoard[adj_y][adj_x] == testBoard[y][x])  // If the stones are the same
+        {
+          if (markingBoard[adj_y][adj_x] > 0 && markingBoard[adj_y][adj_x] != markingBoard[y][x]) // If the group is not the same (yet)
+          {
+            //console.log(`ClearBoard2: Group ${markingBoard[adj_y][adj_x]} is connected to ${markingBoard[y][x]}`);
+            mergeGroups(markingBoard, markingBoard[y][x], markingBoard[adj_y][adj_x]);
+          }
+          else
+            markingBoard[adj_y][adj_x] = markingBoard[y][x];
+        }
+      }
+      //console.log(`State after Vertex:(${x}, ${y}): `, JSON.parse(JSON.stringify(markingBoard)));
+    }
+  }
+
+  return markingBoard;
+}
+
+
+// ****************************
+
+// These are just to protect against stack overflows, stack should never need
+//   to be deeper than N^2 - 1 to fully explore a NxN board.
+var stackDepth = 0;
+var maxStackDepth = -1;
+const StackDepthLimit = 200;
+var tooDeep = false;
+
+// visitedBoard = NxN board to keep track of which vertices have been visited
+//                during the checking process
+// testBoard    = A copy of the real board state that has the played piece
+// vert_x, vert_y = The played Vertex
+// stoneType = which player stone color is the play for.
+//
+function vertexHasLiberty(visitedBoard, testBoard, vert_x, vert_y, stoneType)
+{
+  stackDepth++;
+  if (stackDepth > maxStackDepth) maxStackDepth = stackDepth;
+  if (stackDepth > StackDepthLimit)
+    tooDeep = true;
+  if (tooDeep)
+    {stackDepth--; return false;}
+
+  var oppStone = (stoneType==WHITESTONE)? BLACKSTONE : WHITESTONE;
+  // Get all the possible liberties around this vertex, filtering out any
+  //   deadends as well as any vertices that have already been part of another
+  //   path.
+  var vertices = getFilteredAdjacentVertices(visitedBoard, testBoard, vert_x, vert_y, oppStone);
+  //console.log(`Adjacent vertices: `, vertices);
+  //console.log(`vertexHasLiberty depth:${stackDepth} Vertex:(${vert_x}, ${vert_y}) Stone:${stoneType} Adjacent count: ${vertices.length}`);
+
+  for (var i = 0; i < vertices.length; i++)
+  {
+      var adj_x = vertices[i].x;
+      var adj_y = vertices[i].y;
+      //console.log(`vertexHasLibertyAdjacent depth:${stackDepth} (${vert_x},${vert_y}) adj index: ${i} @ (${adj_x}, ${adj_y}) visited: ${visitedBoard[adj_y][adj_x]} stone: ${testBoard[adj_y][adj_x]}`);
+
+      // Once a vertex has been visited, we can be sure that that path is part
+      //   of another exploration and will be covered.  Important to check this again
+      //   since vertices can be marked visited after the initial list is gotten.
+      if (visitedBoard[adj_y][adj_x] == 0)
+      {
+          // Mark the vertex as having been visited, which means the edges (i.e. Liberties) have
+          //   been explored, or are in the process of being explored.
+          visitedBoard[adj_y][adj_x] = 1;
+
+          var stoneAtVert = testBoard[adj_y][adj_x];
+          if (stoneAtVert == stoneType)  // We found a stone we can continue looking through
+          {
+              //console.log(`Recursive check at (${adj_x}, ${adj_y})`);
+
+              var hasLiberty = vertexHasLiberty(visitedBoard, testBoard, adj_x, adj_y, stoneType);
+              if (hasLiberty)
+                {stackDepth--; return true;};
+          }
+          else if (stoneAtVert == NOSTONE) // We found a liberty
+          {
+            //console.log(`Found no stone at (${adj_x}, ${adj_y})`);
+            {stackDepth--; return true;}
+          }
+      }
+  }
+
+  // If we never found a empty vertex, then the final result after all recursion
+  //   is done will be false, vertex does not have liberty.
+  //
+  {stackDepth--; return false;}
+}
+
+function attemptMove(vert_x, vert_y, stoneType)
+{
+    if (board[vert_y][vert_x] != NOSTONE)
+        return false;
+
+    // Attempt the move in a scratch board
+    var testBoard = copyBoard(board);
+    testBoard[vert_y][vert_x] = stoneType;
+
+    // Remove any groups that have been isolated (no liberties) due to this move
+    var newBoard = cleanBoard(testBoard, stoneType);
+
+    // If after cleaning the piece itself was removed, the move wasn't valid
+    if (newBoard[vert_y][vert_x] == stoneType)
+    {
+        undoBoard = JSON.parse(JSON.stringify(board));
+        board = newBoard;
+        return true;
+    }
+
+    return false;
+}
+
+function findClosestVertex(click_x, click_y)
+{
+    // Find the closest Vertex where click happened
+    var min_d = 999999;
+    var vert_x = -1;
+    var vert_y = -1;
+    for (y = 0; y < board.length; y++)
+    {
+        for (x=0; x < board[y].length; x++)
+        {
+            var vx = x*edgeWidth + p;
+            var vy = y*edgeWidth + p;
+            var d = Math.sqrt((click_x - vx)*(click_x-vx) + (click_y-vy)*(click_y-vy));
+            if (d <= stoneRadius)
+            { // Probably could just check if d is within 'stoneRadius'
+              vert_x = x;
+              vert_y = y;
+              return {"vert_x":vert_x, "vert_y":vert_y}
+            }
+        }
+    }
+
+    return null;
+}
+
+function clickOnGameCanvas(event)
+{
+    var click_x = event.pageX - elemLeft;
+    var click_y = event.pageY - elemTop;
+
+    var vertex = findClosestVertex(click_x, click_y);
+    if (vertex == null)
+      return;
+
+    var stone = getActiveStone();
+
+    // Toggle the piece at that vertex
+    var validMove = false;
+    var vert_x = vertex.vert_x;
+    var vert_y = vertex.vert_y;
+    if (vert_x >= 0 && vert_x < boardSize && vert_y >= 0 && vert_y < boardSize)
+    {
+        // Special mode to clear pieces on board...
+        if (stone == NOSTONE)
+          board[vert_y][vert_x] = stone;
+        else
+        {
+            validMove = attemptMove(vert_x, vert_y, stone);
+            if (validMove)
+                swapActivePlayer(stone);
+        }
+    }
+
+    drawBoard();
+}
+
+function getActiveStone()
+{
+  var stone = NOSTONE;
+  if (document.getElementById("white").checked)
+    stone = WHITESTONE;
+  else if (document.getElementById("black").checked)
+    stone = BLACKSTONE;
+
+  return stone;
+}
+
+function swapActivePlayer(stone)
+{
+    // Alternate player if in play mode
+    var playMode = document.getElementById("playmode").checked;
+    if (playMode)
+    {
+        if (stone == WHITESTONE)
+          document.getElementById("black").checked = true;
+        else if (stone == BLACKSTONE)
+          document.getElementById("white").checked = true;
+    }
+}
+
+function copyBoard(boardToCopy)
+{
+   // This is an easy way to make a copy of the 2D array 'board'
+   return JSON.parse(JSON.stringify(boardToCopy))
+}
+
+function getBlankBoard()
+{
+    var blankBoard = new Array(boardSize);
+
+    for (y = 0; y < blankBoard.length; y++)
+    {
+        blankBoard[y] = new Array(boardSize);
+        for (x=0; x < blankBoard[y].length; x++)
+          blankBoard[y][x] = 0;
+    }
+
+    return blankBoard;
+}
+
+// Use to capture board state (position) and use for debugging
+function dumpBoard()
+{
+  console.log(`board = JSON.parse("${JSON.stringify(board)}")`);
+}
+
+function initBoard()
+{
+    // Use the 'dumpBoard()' function to create these lines to start with a particular board position
+    //
+    //board = JSON.parse("[[2,1,2,0,0,0,0,0,0],[1,0,2,0,0,0,0,0,0],[2,2,2,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]]");
+    //board = JSON.parse("[[2,1,2,0,0,0,0,0,0],[1,2,2,1,1,1,0,0,0],[2,2,2,2,2,1,0,0,0],[2,1,1,1,2,1,0,0,0],[2,2,1,1,0,1,0,0,0],[2,0,0,1,1,1,0,0,0],[0,0,0,1,0,1,0,0,0],[0,0,0,1,0,1,0,0,0],[0,0,0,1,0,1,0,0,0]]")
+    //board = JSON.parse("[[2,1,0,0,0,0,0,0,0],[1,1,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]]")
+    //board = JSON.parse("[[0,1,2,0,0,0,0,0,0],[1,1,2,0,0,0,0,0,0],[2,2,2,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]]")
+    //board = JSON.parse("[[0,1,2,0,0,0,0,0,0],[1,1,2,0,0,0,0,0,0],[2,2,2,0,0,0,0,0,0],[2,1,2,0,0,0,0,0,0],[1,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]]")
+    //return;
+
+    board = new Array(boardSize);
+
+    for (y = 0; y < board.length; y++)
+    {
+        board[y] = new Array(boardSize);
+        for (x=0; x < board[y].length; x++)
+          board[y][x] = 0;
+    }
+}
+
+function drawBoard()
+{
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "AntiqueWhite";
+    context.fillRect(0, 0, 500, 500);
+
+    context.beginPath();
+    // Vertical lines
+    for (var x = 0; x < boardSize; x += 1) {
+        context.moveTo(0.5 + x*edgeWidth + p, p);
+        context.lineTo(0.5 + x*edgeWidth + p, bw+p);
+    }
+
+    for (var x = 0; x < boardSize; x += 1) {
+        context.moveTo(p, 0.5 + x*edgeWidth + p);
+        context.lineTo(bw+p, 0.5 + x*edgeWidth + p);
+    }
+    context.strokeStyle = "black";
+    context.closePath();
+    context.stroke();
+
+    drawStones(canvas, board);
+}
+
+function drawStones()
+{
+  for (var y = 0; y < board.length; y++)
+  {
+      for (var x=0; x < board[y].length; x++)
+      {
+          var color;
+
+          if (board[y][x] == NOSTONE)
+            continue;
+
+          if (board[y][x] == BLACKSTONE)
+            color = 'black';
+          else if (board[y][x] == WHITESTONE)
+            color = 'white';
+
+          context.beginPath();
+          context.arc(x*edgeWidth + p, y*edgeWidth + p, stoneRadius, 0, 2 * Math.PI, false);
+          context.fillStyle = color;
+          context.fill();
+          context.lineWidth = 1;
+          context.strokeStyle = '#003300';
+          context.closePath();
+          context.stroke();
+      }
+  }
+}
+
+initBoard();
+drawBoard();
+
+</script>
